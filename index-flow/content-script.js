@@ -77,6 +77,7 @@
   };
   var activeRun = null;
   var heartbeatTimer = null;
+  var lastReportedItemId = null;
   function sendHeartbeat(runId) {
     void sendMessage({ type: "HEARTBEAT", runId }).catch(() => void 0);
   }
@@ -142,8 +143,17 @@
   function errorMessage(error) {
     return error instanceof Error ? error.message : String(error);
   }
-  async function sendMessage(message) {
-    return chrome.runtime.sendMessage(message);
+  async function sendMessage(message, attempts = 1) {
+    let lastError = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await chrome.runtime.sendMessage(message);
+      } catch (error) {
+        lastError = error;
+        if (attempt < attempts - 1) await new Promise((resolve) => window.setTimeout(resolve, 400));
+      }
+    }
+    throw lastError;
   }
   function log(level, message, runId) {
     void sendMessage({ type: "LOG", runId, level, message }).catch(() => void 0);
@@ -1007,10 +1017,12 @@
     }
   }
   async function runQueue(run, resumeWork) {
+    let busyWaits = 0;
+    let reportRejections = 0;
     try {
       await waitForPostSuccessResume(run);
       run.loopAlive = true;
-      while (!run.controller.signal.aborted && activeRun?.runId === run.runId) {
+      while (!run.controller.signal.aborted && activeRun === run) {
         run.loopAlive = true;
         const health = pageHealth();
         if (!health.healthy && health.reason === "login") {
@@ -1027,21 +1039,38 @@
         if (resumed) {
           work = { success: true, item: resumed.item, operationId: resumed.operationId, indexMode: resumed.indexMode };
         } else {
-          const response = await sendMessage({ type: "NEXT_ITEM", runId: run.runId });
+          const response = await sendMessage({ type: "NEXT_ITEM", runId: run.runId, lastReportedItemId }, 2);
           work = response.work;
           if (!response.success || !work?.success) throw new Error(response.error ?? work?.error ?? "تعذر جلب الرابط التالي.");
         }
-        if (work.done || !work.item || !work.operationId || !work.indexMode) break;
+        if (work.done) break;
+        if (!work.item || !work.operationId || !work.indexMode) {
+          if (!work.busy) break;
+          busyWaits += 1;
+          if (busyWaits > 20) break;
+          if (busyWaits === 1) log("info", "عملية أخرى لا تزال قيد المعالجة في الخلفية — إعادة المحاولة بعد لحظات.", run.runId);
+          await sleep(2500, run.controller.signal);
+          continue;
+        }
+        busyWaits = 0;
         const result = await processUrl(work.item, work.indexMode, run.controller.signal, run.runId, Boolean(resumed));
+        lastReportedItemId = work.item.id;
         const reported = await sendMessage({
           type: "REPORT_RESULT",
           runId: run.runId,
           operationId: work.operationId,
           itemId: work.item.id,
           result
-        });
+        }, 2);
         const resultResponse = reported.result;
-        if (!reported.success || !resultResponse?.success) break;
+        if (!reported.success || !resultResponse?.success) {
+          reportRejections += 1;
+          if (reportRejections >= 3) break;
+          log("warning", "لم تُسجل نتيجة الرابط في الخلفية — إعادة المحاولة تلقائيًا.", run.runId);
+          await sleep(1500, run.controller.signal);
+          continue;
+        }
+        reportRejections = 0;
         const delaySeconds = result.outcome === "skipped_mode" ? Math.max(SKIPPED_OPERATION_DELAY_SECONDS, resultResponse.delaySeconds) : Math.max(MIN_OPERATION_DELAY_SECONDS, resultResponse.delaySeconds);
         if (result.outcome === "accepted") {
           if (resultResponse.continueRunning) {
@@ -1064,7 +1093,7 @@
       }
     } finally {
       run.loopAlive = false;
-      if (activeRun?.runId === run.runId) {
+      if (activeRun === run) {
         activeRun = null;
         stopHeartbeat();
       }
@@ -1078,9 +1107,10 @@
     void runQueue(activeRun, resumeWork);
   }
   function stopRun(runId) {
-    if (!activeRun) return;
-    if (runId && activeRun.runId !== runId) return;
+    if (!activeRun) return false;
+    if (runId && activeRun.runId !== runId) return false;
     activeRun.controller.abort();
+    return true;
   }
   function installListener() {
     const marker = "__gscBulkIndexerContentLoaded";
@@ -1110,8 +1140,7 @@
           sendResponse({ success: true });
           return false;
         case "STOP_RUN":
-          stopRun(message.runId);
-          sendResponse({ success: true });
+          sendResponse({ success: true, hadActiveRun: stopRun(message.runId) });
           return false;
         case "PROPERTY_STATUS": {
           const host = String(message.host || "").toLowerCase();

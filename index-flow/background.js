@@ -5266,6 +5266,7 @@ async function startQueue() {
       finalRetryDone: false,
       startedAt: Date.now()
     };
+    draft.completionNotice = void 0;
     draft.completionShot = void 0;
     pushLog(draft, "success", `بدأ الطابور بـ ${draft.stats.pending} رابطًا في الانتظار.`);
     return draft;
@@ -5285,6 +5286,17 @@ async function startQueue() {
     throw new Error("تعذر بدء الأتمتة في تبويب Search Console. أعد تحميل التبويب وحاول مجددًا.");
   }
 }
+async function settleStoppedRun(runId, message) {
+  return mutateState((draft) => {
+    if (draft.runState.runId !== runId || draft.runState.status !== "stopping") return draft;
+    const count = requeueProcessingItems(draft);
+    draft.runState.status = "stopped";
+    draft.runState.stopRequested = false;
+    draft.runState.stoppedAt = Date.now();
+    pushLog(draft, "warning", count > 0 ? `${message} — أُعيد الرابط النشط إلى الانتظار.` : message);
+    return draft;
+  });
+}
 async function stopQueue() {
   const current = await getState();
   if (current.runState.status !== "running" && current.runState.status !== "stopping") return current;
@@ -5300,20 +5312,22 @@ async function stopQueue() {
       draft.runState.stoppedAt = Date.now();
     }
     pushLog(draft, "warning", draft.runState.status === "stopping" ? "جارٍ الإيقاف عند نقطة الأمان الحالية..." : "تم إيقاف الطابور.");
+    if (runId && draft.runState.status === "stopping") {
+      try {
+        chrome.alarms.create(`stop-${runId}`, { when: Date.now() + 2e4 });
+      } catch {
+      }
+    }
     return draft;
   });
   if (tabId !== void 0) {
     try {
-      await sendToTab(tabId, { type: "STOP_RUN", runId });
+      const response = await sendToTab(tabId, { type: "STOP_RUN", runId });
+      if (response && response.success && response.hadActiveRun === false && state.runState.status === "stopping") {
+        return settleStoppedRun(runId, "لا يوجد مشغّل نشط في الصفحة — تم إيقاف الطابور فورًا.");
+      }
     } catch {
-      return mutateState((draft) => {
-        requeueProcessingItems(draft);
-        draft.runState.status = "stopped";
-        draft.runState.stopRequested = false;
-        draft.runState.stoppedAt = Date.now();
-        pushLog(draft, "warning", "تبويب Search Console غير متاح؛ أُعيد الرابط الحالي إلى الانتظار.");
-        return draft;
-      });
+      return settleStoppedRun(runId, "تبويب Search Console غير متاح؛ تم إيقاف الطابور.");
     }
   }
   return state;
@@ -5342,15 +5356,33 @@ async function resetAll() {
   }
   return resetStorage();
 }
-async function nextItem(runId, sender) {
+async function nextItem(message, sender) {
+  const runId = message.runId;
+  const lastReportedItemId = typeof message.lastReportedItemId === "string" ? message.lastReportedItemId : "";
   const out = await mutateState((state) => {
     if (sender.tab?.id !== state.runState.gscTabId) return { success: false, error: "طلب العمل جاء من تبويب مختلف." };
     state.runState.wait = void 0;
-    const claimed = claimNextItem(state, runId);
+    const staleRun = state.runState.runId !== runId;
+    let claimed = staleRun ? null : claimNextItem(state, runId);
+    if (!claimed && !staleRun && !state.runState.stopRequested && lastReportedItemId) {
+      const lost = state.queue.find((candidate) => candidate.id === lastReportedItemId && candidate.status === "processing" && candidate.runId === runId);
+      if (lost) {
+        lost.status = "pending";
+        lost.startedAt = void 0;
+        lost.runId = void 0;
+        lost.operationId = void 0;
+        lost.outcome = void 0;
+        lost.finishedAt = void 0;
+        state.runState.currentItemId = void 0;
+        state.stats = computeStats(state.queue);
+        pushLog(state, "warning", `النتيجة السابقة لـ ${lost.url} لم تُسجّل — أُعيد الرابط إلى الانتظار لإعادة معالجته.`);
+        claimed = claimNextItem(state, runId);
+      }
+    }
     if (!claimed) {
-      const done = state.runState.status !== "running";
+      const done = staleRun || state.runState.status !== "running";
       if (done && state.runState.status === "completed") pushLog(state, "success", "اكتمل الطابور.");
-      return { success: true, done, completionAt: state.completionNotice?.at ?? 0, completionNotified: state.completionNotifiedAt ?? 0 };
+      return { success: true, done, busy: !done, completionAt: state.completionNotice?.at ?? 0, completionNotified: state.completionNotifiedAt ?? 0 };
     }
     pushLog(state, "info", `جارٍ معالجة ${claimed.item.url}`);
     return {
@@ -5415,6 +5447,7 @@ async function reportResult(message, sender) {
 }
 async function notifyCompletionOnce(at, notified) {
   if (!at || at === notified) return;
+  if (Date.now() - at > 10 * 60e3) return;
   let notice = null;
   await mutateState((draft) => {
     if (draft.completionNotice && draft.completionNotice.at === at && draft.completionNotifiedAt !== at) {
@@ -5447,27 +5480,33 @@ async function captureCompletionShot() {
   try {
     tab = await chrome.tabs.get(tabId);
   } catch {
+    await appendLog("warning", "تعذر أخذ لقطة شاشة: تبويب Search Console لم يعد متاحًا.");
     return;
   }
   if (!tab || !isGscUrl(tab.url)) return;
-  let previousActiveId = null;
+  let wasActive = false;
   try {
     const actives = await chrome.tabs.query({ active: true, windowId: tab.windowId });
-    previousActiveId = actives[0]?.id ?? null;
+    wasActive = actives[0]?.id === tabId;
   } catch {
   }
   let dataUrl = null;
-  try {
-    if (previousActiveId !== tabId) await chrome.tabs.update(tabId, { active: true });
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
-  } catch {
-    dataUrl = null;
-  }
-  if (previousActiveId !== null && previousActiveId !== tabId) {
+  for (let attempt = 0; attempt < 2 && !dataUrl; attempt += 1) {
     try {
-      await chrome.tabs.update(previousActiveId, { active: true });
+      if (!wasActive) {
+        await chrome.tabs.update(tabId, { active: true });
+        if (tab.windowId !== void 0) {
+          try {
+            await chrome.windows.update(tab.windowId, { focused: true });
+          } catch {
+          }
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
     } catch {
+      dataUrl = null;
+      await new Promise((resolve) => setTimeout(resolve, 400));
     }
   }
   if (!dataUrl) {
@@ -5481,12 +5520,18 @@ async function captureCompletionShot() {
     }
     return draft;
   });
-  await appendLog("success", "تم حفظ لقطة شاشة لصفحة آخر نتيجة في إشعار الانتهاء.");
+  await appendLog("success", "التُقطت لقطة شاشة لصفحة آخر نتيجة وحُفظت مع إشعار الانتهاء — التبويب بقي على نفس الصفحة.");
 }
 async function handleMessage(message, sender) {
   switch (message.type) {
-    case "GET_STATE":
-      return { success: true, state: await getState() };
+    case "GET_STATE": {
+      const snapshot = await getState();
+      const noticeAt = snapshot.completionNotice?.at ?? 0;
+      if (noticeAt && noticeAt !== (snapshot.completionNotifiedAt ?? 0)) {
+        void notifyCompletionOnce(noticeAt, snapshot.completionNotifiedAt ?? 0).catch(() => void 0);
+      }
+      return { success: true, state: snapshot };
+    }
     case "LOAD_SITEMAP":
       return { success: true, state: await loadSitemap(message.sitemapUrl) };
     case "LOAD_DIRECT_URLS":
@@ -5504,7 +5549,7 @@ async function handleMessage(message, sender) {
     case "CLEAR_LOGS":
       return { success: true, state: await clearLogs() };
     case "NEXT_ITEM":
-      return { success: true, work: await nextItem(message.runId, sender) };
+      return { success: true, work: await nextItem(message, sender) };
     case "REPORT_RESULT":
       return { success: true, result: await reportResult(message, sender) };
     case "SET_WAIT_STATE":
@@ -5582,6 +5627,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "complete" && isGscUrl(currentUrl)) void recoverRunAfterGscNavigation(tabId);
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name.startsWith("stop-")) {
+    void settleStoppedRun(alarm.name.slice(5), "انتهت مهلة الإيقاف الآمن — تم إيقاف الطابور.").catch(() => void 0);
+    return;
+  }
   if (!alarm.name.startsWith("wd-")) return;
   const runId = alarm.name.slice(3);
   void (async () => {

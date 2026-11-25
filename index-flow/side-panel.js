@@ -252,6 +252,7 @@ var ui = {
   wizardNextText: element("wizardNextText"),
   runPill: element("runPill"),
   runStatusText: element("runStatusText"),
+  runTitle: element("runTitle"),
   headerPill: element("headerPill"),
   headerStatusText: element("headerStatusText"),
   headerQueueCount: element("headerQueueCount"),
@@ -574,6 +575,7 @@ function renderRunElapsed() {
 function renderHeader() {
   ui.runPill.dataset.status = state.runState.status;
   ui.runStatusText.textContent = runStatusLabel(state.runState.status);
+  ui.runTitle.textContent = runStatusLabel(state.runState.status);
   ui.headerPill.dataset.status = state.runState.status;
   ui.headerStatusText.textContent = runStatusLabel(state.runState.status);
   const total = state.stats.total;
@@ -643,12 +645,12 @@ function renderWizard() {
   }
   lastRenderedWizardStep = wizardStep;
   ui.wizardBackButton.hidden = wizardStep === 1;
-  ui.wizardNextButton.hidden = wizardStep === 1 || wizardStep === 4;
-  ui.wizardNextButton.disabled = busyAction !== null || wizardStep === 2 && conversionStatus !== "success";
   const hasSitemapValue = Boolean(ui.sitemapUrl.value.trim());
   const hasDirectValue = parseDirectLinks(ui.directUrls.value).length > 0;
-  const stepOneLabel = hasSitemapValue && hasDirectValue ? t("loadAll") : hasSitemapValue ? t("continueToLoad") : hasDirectValue ? t("loadDirectUrlsButton") : t("continueToLoad");
-  ui.wizardNextText.textContent = wizardStep === 1 ? stepOneLabel : wizardStep === 2 ? t("continueToSettings") : t("next");
+  const bothSourcesOnStepOne = wizardStep === 1 && hasSitemapValue && hasDirectValue;
+  ui.wizardNextButton.hidden = wizardStep === 4 || wizardStep === 1 && !bothSourcesOnStepOne;
+  ui.wizardNextButton.disabled = busyAction !== null || wizardStep === 2 && conversionStatus !== "success";
+  ui.wizardNextText.textContent = wizardStep === 1 ? t("loadAll") : wizardStep === 2 ? t("continueToSettings") : t("next");
 }
 function renderConversion() {
   ui.conversionCard.dataset.status = conversionStatus;
@@ -868,7 +870,7 @@ function maybeShowCompletionDialog() {
   const notice = state.completionNotice;
   if (!notice || !Number.isFinite(notice.at) || notice.at === lastCompletionShown) return;
   lastCompletionShown = notice.at;
-  if (Date.now() - notice.at > 6e4) return;
+  if (Date.now() - notice.at > 3e5) return;
   if (ui.queueFilter.value === "processing" || ui.queueFilter.value === "pending") {
     ui.queueFilter.value = "all";
     queuePage = 1;
@@ -1084,6 +1086,7 @@ async function runAction(action) {
   try {
     const response = await send({ type: action === "start" ? "START_QUEUE" : "STOP_QUEUE" });
     await applyResponse(response, action === "start" ? t("queueStarted") : t("stopRequested"));
+    if (action === "start" && ui.completionDialog.open) ui.completionDialog.close();
   } catch (error) {
     showToast(error instanceof Error ? error.message : String(error), "error");
   } finally {
