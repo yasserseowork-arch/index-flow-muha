@@ -140,6 +140,8 @@ var fallbackDictionary = {
   "activity": "النشاط",
   "copyLog": "نسخ سجل النشاط",
   "clearLog": "مسح النشاط",
+  "logShow": "إظهار سجل النشاط",
+  "logHide": "إخفاء سجل النشاط",
   "logEmpty": "لا نشاط مسجّل بعد.",
   "copyright": "© 2026 IndexFlow. جميع الحقوق محفوظة.",
   "resetTitle": "إعادة ضبط كل شيء؟",
@@ -250,8 +252,6 @@ var ui = {
   wizardBackButton: element("wizardBackButton"),
   wizardNextButton: element("wizardNextButton"),
   wizardNextText: element("wizardNextText"),
-  runPill: element("runPill"),
-  runStatusText: element("runStatusText"),
   runTitle: element("runTitle"),
   headerPill: element("headerPill"),
   headerStatusText: element("headerStatusText"),
@@ -321,6 +321,8 @@ var ui = {
   pageLabel: element("pageLabel"),
   activityLog: element("activityLog"),
   logEmpty: element("logEmpty"),
+  logBody: element("logBody"),
+  toggleLogButton: element("toggleLogButton"),
   copyLogsButton: element("copyLogsButton"),
   clearLogsButton: element("clearLogsButton"),
   resetDialog: element("resetDialog"),
@@ -403,6 +405,8 @@ function applyTranslations() {
   ui.copyLogsButton.title = t("copyLog");
   ui.clearLogsButton.setAttribute("aria-label", t("clearLog"));
   ui.clearLogsButton.title = t("clearLog");
+  ui.toggleLogButton.setAttribute("aria-label", t("logShow"));
+  ui.toggleLogButton.title = t("logShow");
   ui.exportCsvButton.setAttribute("aria-label", t("exportCsv"));
   ui.exportCsvButton.title = t("exportCsv");
   ui.aboutButton.setAttribute("aria-label", t("aboutButton"));
@@ -573,8 +577,6 @@ function renderRunElapsed() {
   if (active) ui.runElapsed.textContent = t("runElapsed", { time: formatClockDuration(Date.now() - runState.startedAt) });
 }
 function renderHeader() {
-  ui.runPill.dataset.status = state.runState.status;
-  ui.runStatusText.textContent = runStatusLabel(state.runState.status);
   ui.runTitle.textContent = runStatusLabel(state.runState.status);
   ui.headerPill.dataset.status = state.runState.status;
   ui.headerStatusText.textContent = runStatusLabel(state.runState.status);
@@ -1276,6 +1278,14 @@ function bindEvents() {
   ui.nextPage.addEventListener("click", () => {
     queuePage += 1;
     renderQueue();
+  });
+  ui.toggleLogButton.addEventListener("click", () => {
+    const expanded = ui.toggleLogButton.getAttribute("aria-expanded") === "true";
+    const next = !expanded;
+    ui.toggleLogButton.setAttribute("aria-expanded", String(next));
+    ui.logBody.hidden = !next;
+    ui.toggleLogButton.setAttribute("aria-label", t(next ? "logHide" : "logShow"));
+    ui.toggleLogButton.title = t(next ? "logHide" : "logShow");
   });
   ui.copyLogsButton.addEventListener("click", () => {
     void navigator.clipboard.writeText(logText()).then(() => showToast(t("activityCopied")), () => showToast(t("copyFailed"), "error"));

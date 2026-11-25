@@ -1142,6 +1142,13 @@
         case "STOP_RUN":
           sendResponse({ success: true, hadActiveRun: stopRun(message.runId) });
           return false;
+        case "SCROLL_TOP":
+          try {
+            window.scrollTo(0, 0);
+          } catch {
+          }
+          window.setTimeout(() => sendResponse({ success: true }), 300);
+          return true;
         case "PROPERTY_STATUS": {
           const host = String(message.host || "").toLowerCase();
           const current = currentPropertyHost();

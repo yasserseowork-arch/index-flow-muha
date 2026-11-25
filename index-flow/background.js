@@ -5469,58 +5469,90 @@ async function notifyCompletionOnce(at, notified) {
   }
   await captureCompletionShot();
 }
+var captureShotInFlight = false;
 async function captureCompletionShot() {
-  const state = await getState();
-  const notice = state.completionNotice;
-  if (!notice || !Number.isFinite(notice.at)) return;
-  if (state.completionShot && state.completionShot.at === notice.at) return;
-  const tabId = state.runState.gscTabId;
-  if (tabId === void 0) return;
-  let tab = null;
+  if (captureShotInFlight) return;
+  captureShotInFlight = true;
   try {
-    tab = await chrome.tabs.get(tabId);
-  } catch {
-    await appendLog("warning", "تعذر أخذ لقطة شاشة: تبويب Search Console لم يعد متاحًا.");
-    return;
-  }
-  if (!tab || !isGscUrl(tab.url)) return;
-  let wasActive = false;
-  try {
-    const actives = await chrome.tabs.query({ active: true, windowId: tab.windowId });
-    wasActive = actives[0]?.id === tabId;
-  } catch {
-  }
-  let dataUrl = null;
-  for (let attempt = 0; attempt < 2 && !dataUrl; attempt += 1) {
+    const state = await getState();
+    const notice = state.completionNotice;
+    if (!notice || !Number.isFinite(notice.at)) return;
+    if (state.completionShot && state.completionShot.at === notice.at) return;
+    const tabId = state.runState.gscTabId;
+    if (tabId === void 0) return;
+    let tab = null;
     try {
-      if (!wasActive) {
-        await chrome.tabs.update(tabId, { active: true });
-        if (tab.windowId !== void 0) {
-          try {
-            await chrome.windows.update(tab.windowId, { focused: true });
-          } catch {
-          }
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 600));
-      dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
+      tab = await chrome.tabs.get(tabId);
     } catch {
-      dataUrl = null;
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await appendLog("warning", "تعذر أخذ لقطة شاشة: تبويب Search Console لم يعد متاحًا.");
+      return;
     }
-  }
-  if (!dataUrl) {
-    await appendLog("warning", "تعذر أخذ لقطة شاشة لصفحة الانتهاء — اللقطة اختيارية ولا تؤثر على النتائج.");
-    return;
-  }
-  const pageUrl = tab.url;
-  await mutateState((draft) => {
-    if (draft.completionNotice && draft.completionNotice.at === notice.at) {
-      draft.completionShot = { at: notice.at, dataUrl, url: pageUrl, capturedAt: Date.now() };
+    if (!tab || !isGscUrl(tab.url)) {
+      await appendLog("warning", "تعذر أخذ لقطة شاشة: التبويب لم يعد على صفحة Search Console.");
+      return;
     }
-    return draft;
-  });
-  await appendLog("success", "التُقطت لقطة شاشة لصفحة آخر نتيجة وحُفظت مع إشعار الانتهاء — التبويب بقي على نفس الصفحة.");
+    try {
+      await Promise.race([
+        sendToTab(tabId, { type: "SCROLL_TOP" }),
+        new Promise((resolve) => setTimeout(resolve, 1500))
+      ]);
+    } catch {
+    }
+    let wasActive = false;
+    try {
+      const actives = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+      wasActive = actives[0]?.id === tabId;
+    } catch {
+    }
+    let dataUrl = null;
+    for (let attempt = 0; attempt < 3 && !dataUrl; attempt += 1) {
+      try {
+        if (!wasActive) {
+          await chrome.tabs.update(tabId, { active: true });
+          if (tab.windowId !== void 0) {
+            try {
+              await chrome.windows.update(tab.windowId, { focused: true });
+            } catch {
+            }
+          }
+          wasActive = true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 88 });
+      } catch {
+        dataUrl = null;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+    if (!dataUrl) {
+      await appendLog("warning", "تعذر أخذ لقطة شاشة لصفحة الانتهاء — هتتعاد تلقائيًا لو فتحت اللوحة خلال10 دقائق.");
+      return;
+    }
+    const pageUrl = tab.url;
+    await mutateState((draft) => {
+      if (draft.completionNotice && draft.completionNotice.at === notice.at) {
+        draft.completionShot = { at: notice.at, dataUrl, url: pageUrl, capturedAt: Date.now() };
+      }
+      return draft;
+    });
+    await appendLog("success", "التُقطت لقطة شاشة لصفحة آخر نتيجة وحُفظت مع إشعار الانتهاء — التبويب بقي على نفس الصفحة.");
+    const now = new Date();
+    const pad = (value) => String(value).padStart(2, "0");
+    const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    try {
+      await chrome.downloads.download({
+        url: dataUrl,
+        filename: `indexflow-last-page-${stamp}.jpg`,
+        saveAs: false,
+        conflictAction: "uniquify"
+      });
+      await appendLog("success", "تم تنزيل اللقطة تلقائيًا إلى مجلد التنزيلات.");
+    } catch {
+      await appendLog("warning", "تم حفظ اللقطة داخل الإضافة لكن تعذر تنزيلها — نزّلها من زر «تحميل اللقطة» في إشعار الانتهاء.");
+    }
+  } finally {
+    captureShotInFlight = false;
+  }
 }
 async function handleMessage(message, sender) {
   switch (message.type) {
@@ -5529,6 +5561,9 @@ async function handleMessage(message, sender) {
       const noticeAt = snapshot.completionNotice?.at ?? 0;
       if (noticeAt && noticeAt !== (snapshot.completionNotifiedAt ?? 0)) {
         void notifyCompletionOnce(noticeAt, snapshot.completionNotifiedAt ?? 0).catch(() => void 0);
+      }
+      if (noticeAt && Date.now() - noticeAt <= 10 * 60e3 && !(snapshot.completionShot && snapshot.completionShot.at === noticeAt)) {
+        void captureCompletionShot().catch(() => void 0);
       }
       return { success: true, state: snapshot };
     }

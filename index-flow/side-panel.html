@@ -161,10 +161,6 @@
         <div class="run-copy">
           <div class="run-heading-row">
             <span class="step-label light" data-i18n="runStep">04 · التشغيل</span>
-            <div class="run-pill" id="runPill" data-status="idle" aria-live="polite">
-              <span class="run-dot" aria-hidden="true"></span>
-              <span id="runStatusText" data-i18n="statusIdle">جاهز</span>
-            </div>
             <span id="runElapsed" class="count-badge elapsed-badge" hidden></span>
           </div>
           <h2 id="runTitle" data-i18n="runTitle">جاهز</h2>
@@ -273,7 +269,12 @@
             <span class="step-label" data-i18n="diagnostics">سجل التشغيل</span>
             <h2 id="logTitle" data-i18n="activity">النشاط</h2>
           </div>
-          <div class="mini-actions">
+          <button id="toggleLogButton" class="icon-button log-toggle" type="button" aria-expanded="false" aria-controls="logBody" aria-label="إظهار سجل النشاط" title="إظهار سجل النشاط">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+        </div>
+        <div id="logBody" class="log-body" hidden>
+          <div class="mini-actions log-tools">
             <button id="copyLogsButton" class="icon-button" type="button" aria-label="نسخ سجل النشاط" title="نسخ السجل">
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>
             </button>
@@ -281,9 +282,9 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-9 0 1 14h10l1-14M10 11v6m4-6v6"/></svg>
             </button>
           </div>
+          <div id="activityLog" class="activity-log" role="log" aria-live="polite"></div>
+          <div id="logEmpty" class="log-empty" data-i18n="logEmpty">لا نشاط مسجّل بعد.</div>
         </div>
-        <div id="activityLog" class="activity-log" role="log" aria-live="polite"></div>
-        <div id="logEmpty" class="log-empty" data-i18n="logEmpty">لا نشاط مسجّل بعد.</div>
       </section>
 
       <div id="wizardControls" class="wizard-controls">
